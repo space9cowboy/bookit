@@ -1,0 +1,5 @@
+# Contexte de build de l'API (./app) : on n'envoie que le nécessaire.
+**/node_modules
+**/dist
+**/.env
+web

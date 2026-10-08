@@ -1,0 +1,64 @@
+# BookIt — `docker compose up --build` lance db + api + web.
+# Toutes les variables ont une valeur par défaut : aucun .env n'est requis.
+# Pour personnaliser : cp .env.example .env (voir les commentaires du fichier).
+name: bookit
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bookit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bookit}
+      POSTGRES_DB: ${POSTGRES_DB:-bookit}
+    ports:
+      - '${DB_PORT:-5433}:5432'
+    volumes:
+      # 01_schema.sql puis 02_seed.sql, exécutés à la création du conteneur
+      - ./app/db:/docker-entrypoint-initdb.d:ro
+    # Données en mémoire : chaque nouveau conteneur db repart du seed.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      # TCP (et non socket) : pendant l'init, Postgres n'écoute que sur le socket local,
+      # donc le service n'est "healthy" qu'une fois le schéma et le seed appliqués.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  api:
+    build:
+      context: ./app
+      dockerfile: api/Dockerfile
+    environment:
+      NODE_ENV: ${NODE_ENV:-test}
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-bookit}:${POSTGRES_PASSWORD:-bookit}@db:5432/${POSTGRES_DB:-bookit}
+      JWT_SECRET: ${JWT_SECRET:-bookit-local-secret-change-me}
+      JWT_EXPIRES_IN_SECONDS: ${JWT_EXPIRES_IN_SECONDS:-3600}
+      BUG: ${BUG:-}
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/api/health > /dev/null || exit 1']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  web:
+    build:
+      context: ./app/web
+      args:
+        VITE_BUG: ${VITE_BUG:-}
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    depends_on:
+      api:
+        condition: service_healthy

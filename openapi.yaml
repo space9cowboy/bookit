@@ -1,0 +1,552 @@
+openapi: 3.0.3
+info:
+  title: BookIt API
+  version: 1.0.0
+  description: |
+    Meeting room booking API — test target application.
+
+    **Conventions**
+    - All routes are prefixed with `/api`, JSON only.
+    - Dates are ISO 8601 with a mandatory timezone (`2030-01-01T10:00:00Z` or `…+02:00`). Responses are in UTC.
+    - Every error uses the same shape: `{ "error": { "code": "...", "message": "..." } }`.
+      Validation errors (400) also include `details: [{ path, message }]`.
+    - Request bodies are strict: an unknown field returns 400 `VALIDATION_ERROR`.
+    - A non-numeric path id returns 400 `VALIDATION_ERROR`.
+
+    **Authorization (rule 6)**: a booking owned by another user is reported as
+    **404 `BOOKING_NOT_FOUND`** (its existence is not revealed). Admin-only routes
+    return **403 `FORBIDDEN`** to regular users.
+
+    **Error priority when creating a booking**: 400 validation → 404 `ROOM_NOT_FOUND` →
+    422 `ROOM_INACTIVE` → 422 `BOOKING_IN_PAST` → 422 `DURATION_OUT_OF_RANGE` →
+    422 `CAPACITY_EXCEEDED` → 409 `BOOKING_OVERLAP`.
+servers:
+  - url: http://localhost:8080/api
+    description: Through the web container (nginx proxy)
+  - url: http://localhost:3000/api
+    description: API container directly
+
+tags:
+  - name: system
+  - name: auth
+  - name: rooms
+  - name: bookings
+  - name: test
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [system]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: API and database are up
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Database unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      summary: Create a user account (role is always `user`)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Account created, user is logged in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409':
+          description: '`EMAIL_ALREADY_USED`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Log in and get a JWT (valid 1 hour)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: '`INVALID_CREDENTIALS` (same error for unknown email and wrong password)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Current user
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /rooms:
+    get:
+      operationId: listRooms
+      tags: [rooms]
+      summary: List rooms (active and inactive by default)
+      parameters:
+        - name: active
+          in: query
+          required: false
+          schema: { type: string, enum: ['true', 'false'] }
+      responses:
+        '200':
+          description: Rooms ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Room' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createRoom
+      tags: [rooms]
+      summary: Create a room (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRoomRequest' }
+      responses:
+        '201':
+          description: Room created (`Location` header set)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Room' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: '`ROOM_NAME_TAKEN`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /rooms/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getRoom
+      tags: [rooms]
+      summary: Room detail
+      responses:
+        '200':
+          description: Room
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Room' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+    patch:
+      operationId: updateRoom
+      tags: [rooms]
+      summary: "Update a room (admin). Deactivate with `{ \"isActive\": false }`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRoomRequest' }
+      responses:
+        '200':
+          description: Updated room
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Room' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '409':
+          description: '`ROOM_NAME_TAKEN`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /bookings:
+    get:
+      operationId: listBookings
+      tags: [bookings]
+      summary: List bookings — own bookings for a user, all bookings for an admin
+      description: Ordered by `startAt`, then `id`.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/BookingStatus' }
+        - name: roomId
+          in: query
+          schema: { type: integer }
+        - name: userId
+          in: query
+          description: Admin only (ignored for regular users)
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Bookings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createBooking
+      tags: [bookings]
+      summary: Create a booking (status `pending`) for the current user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBookingRequest' }
+      responses:
+        '201':
+          description: Booking created (`Location` header set)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '409':
+          description: '`BOOKING_OVERLAP` — overlaps a pending/confirmed booking of the same room. Touching slots (end 10:00 / start 10:00) do not overlap.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            Business rule violated:
+            `ROOM_INACTIVE`, `BOOKING_IN_PAST`, `DURATION_OUT_OF_RANGE` (30 min – 4 h inclusive),
+            `CAPACITY_EXCEEDED`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /bookings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getBooking
+      tags: [bookings]
+      summary: Booking detail
+      responses:
+        '200':
+          description: Booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/BookingNotFound' }
+
+  /bookings/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: cancelBooking
+      tags: [bookings]
+      summary: Cancel a booking (pending|confirmed → cancelled)
+      description: A user cannot cancel less than 1 hour before start (exactly 1 hour is allowed). Admins can.
+      responses:
+        '200':
+          description: Cancelled booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/BookingNotFound' }
+        '422':
+          description: '`INVALID_STATUS_TRANSITION` or `CANCEL_TOO_LATE`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /bookings/{id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: confirmBooking
+      tags: [bookings]
+      summary: Confirm a booking (admin, pending → confirmed)
+      responses:
+        '200':
+          description: Confirmed booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/BookingNotFound' }
+        '422':
+          description: '`INVALID_STATUS_TRANSITION`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /bookings/{id}/complete:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: completeBooking
+      tags: [bookings]
+      summary: Complete a booking (admin, confirmed → completed, only after it ends)
+      responses:
+        '200':
+          description: Completed booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/BookingNotFound' }
+        '422':
+          description: '`INVALID_STATUS_TRANSITION` or `BOOKING_NOT_ENDED`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /test/reset:
+    post:
+      operationId: resetDatabase
+      tags: [test]
+      summary: Reset the database to the seed state (only when NODE_ENV=test, 404 otherwise)
+      security: []
+      responses:
+        '204':
+          description: Database reset
+        '404':
+          description: Route not mounted (NODE_ENV is not `test`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1, maximum: 2147483647 }
+
+  responses:
+    ValidationError:
+      description: '`VALIDATION_ERROR`, `INVALID_JSON` or `PAYLOAD_TOO_LARGE`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Request validation failed
+              details:
+                - path: attendees
+                  message: Number must be greater than or equal to 1
+    Unauthorized:
+      description: '`UNAUTHORIZED` (no/invalid header), `INVALID_TOKEN` or `TOKEN_EXPIRED`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: '`FORBIDDEN` — admin role required'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RoomNotFound:
+      description: '`ROOM_NOT_FOUND`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BookingNotFound:
+      description: "`BOOKING_NOT_FOUND` — also returned for another user's booking"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: BOOKING_OVERLAP }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  path: { type: string }
+                  message: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, error] }
+        db: { type: string, enum: [up, down] }
+        env: { type: string, enum: [development, test, production] }
+        bugs:
+          type: array
+          description: Injected bugs currently enabled (BUG env variable)
+          items: { type: string }
+
+    Role:
+      type: string
+      enum: [user, admin]
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        createdAt: { type: string, format: date-time }
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, name]
+      properties:
+        email: { type: string, format: email, maxLength: 254, description: Trimmed and lower-cased }
+        password: { type: string, minLength: 8, maxLength: 72 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1 }
+
+    AuthResponse:
+      type: object
+      properties:
+        token: { type: string }
+        expiresIn: { type: integer, description: Seconds, example: 3600 }
+        user: { $ref: '#/components/schemas/User' }
+
+    Equipment:
+      type: string
+      enum: [screen, projector, whiteboard, videoconference, microphone]
+
+    Room:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        capacity: { type: integer }
+        equipment:
+          type: array
+          items: { $ref: '#/components/schemas/Equipment' }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateRoomRequest:
+      type: object
+      additionalProperties: false
+      required: [name, capacity]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        capacity: { type: integer, minimum: 1, maximum: 500 }
+        equipment:
+          type: array
+          default: []
+          items: { $ref: '#/components/schemas/Equipment' }
+        isActive: { type: boolean, default: true }
+
+    UpdateRoomRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        capacity: { type: integer, minimum: 1, maximum: 500 }
+        equipment:
+          type: array
+          items: { $ref: '#/components/schemas/Equipment' }
+        isActive: { type: boolean }
+
+    BookingStatus:
+      type: string
+      enum: [pending, confirmed, cancelled, completed]
+
+    Booking:
+      type: object
+      properties:
+        id: { type: integer }
+        roomId: { type: integer }
+        roomName: { type: string }
+        userId: { type: integer }
+        userEmail: { type: string }
+        userName: { type: string }
+        title: { type: string }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        attendees: { type: integer }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateBookingRequest:
+      type: object
+      additionalProperties: false
+      required: [roomId, title, startAt, endAt, attendees]
+      properties:
+        roomId: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 120 }
+        startAt: { type: string, format: date-time, example: '2030-01-01T10:00:00Z' }
+        endAt: { type: string, format: date-time, example: '2030-01-01T11:00:00Z' }
+        attendees: { type: integer, minimum: 1 }
